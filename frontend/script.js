@@ -1,275 +1,189 @@
-/* Русские комментарии:
- * Это основной JS. Создаём сцену Three.js с плоской плоскостью во весь экран
- * и вешаем на неё наш шейдер "плазма". Плюс постобработка Bloom.
- * Добавлена синхронизация между окнами через BroadcastChannel.
- */
-const canvas = document.getElementById('scene');
-
-// Синхронизация между окнами
-const channel = new BroadcastChannel('plasma-sync');
-let windowId = Math.random().toString(36).substr(2, 9);
-let isMaster = false;
-let syncData = {};
-
-// Утилита: читаем URL-параметры
-const params = new URLSearchParams(location.search);
-let hueDeg = clamp(parseFloat(params.get('hue') || '0'), 0, 360);
-let speed  = clamp(parseFloat(params.get('speed') || '1.2'), 0.1, 3);
-let mirror = params.get('mirror') === '1' ? 1.0 : 0.0;
-let seed   = params.get('seed') || 'default';
-
-// Если нет параметров, генерируем случайные для нового окна
-if (!params.has('hue') && !params.has('speed') && !params.has('mirror') && !params.has('seed')) {
-  // Используем более уникальную рандомизацию
-  const uniqueId = Date.now() + Math.random() * 1000000;
-  hueDeg = (uniqueId * 137.5) % 360; // Золотое сечение для лучшего распределения цветов
-  speed = 0.8 + (uniqueId % 100) / 50; // 0.8-2.8
-  mirror = (uniqueId % 2) === 0 ? 1.0 : 0.0;
-  seed = 'unique_' + uniqueId.toFixed(0);
-  // Обновляем URL без перезагрузки
-  const newUrl = new URL(location);
-  newUrl.searchParams.set('hue', Math.round(hueDeg));
-  newUrl.searchParams.set('speed', speed.toFixed(1));
-  newUrl.searchParams.set('mirror', mirror);
-  newUrl.searchParams.set('seed', seed);
-  history.replaceState({}, '', newUrl);
-}
-
-function clamp(x, lo, hi) { return isNaN(x) ? lo : Math.min(hi, Math.max(lo, x)); }
-
-// Для детерминированного смещения тона по seed (простейший хеш)
-function hashStr(str) {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
+  for(int z=0;z<=1;z++){
+    vec3 g=vec3(float(x),float(y),float(z));
+    float h=hash(i.xy+g.xy+(i.z+g.z)*13.0);
+    float w=dot(f-g,f-g);
+    n += mix(h,h*h,0.5)*(1.0 - smoothstep(0.0,1.0,w));
   }
-  return (h >>> 0) / 4294967295;
+  return clamp(n,0.0,1.0);
 }
-const seedJitter = hashStr(seed) * 0.08 - 0.04; // -0.04..0.04
-
-// Three.js: базовые сущности
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
-
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 1000);
-camera.position.z = 3;
-
-// Геометрия — сфера с плазменным эффектом
-const geo = new THREE.SphereGeometry(1, 64, 64);
-
-// Загружаем шейдеры
-async function loadText(url) {
-  const res = await fetch(url);
-  return await res.text();
+float smin(float a, float b, float k){
+  float h = clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);
+  return mix(b,a,h) - k*h*(1.0-h);
 }
-let material, mesh, composer;
-let mouseX = 0, mouseY = 0;
-let targetRotationX = 0, targetRotationY = 0;
+float map(vec3 p, float t, float linkX, float peers){
+  float ca=cos(t*0.25), sa=sin(t*0.25);
+  mat2 R=mat2(ca,-sa,sa,ca);
+  p.xy = R * p.xy;
 
-// Обработка синхронизации
-channel.addEventListener('message', (event) => {
-  const { type, data, from } = event.data;
-  
-  if (from === windowId) return; // Игнорируем собственные сообщения
-  
-  switch (type) {
-    case 'sync_request':
-      // Отправляем свои параметры
-      channel.postMessage({
-        type: 'sync_response',
-        data: { hueDeg, speed, mirror, seed, windowId },
-        from: windowId
-      });
-      break;
-      
-    case 'sync_response':
-      // Получаем параметры другого окна
-      syncData[from] = data;
-      updateHUD();
-      break;
-      
-    case 'parameter_change':
-      // НЕ синхронизируем цвета - только скорость и зеркало
-      if (data.speed !== undefined) speed = data.speed;
-      if (data.mirror !== undefined) mirror = data.mirror;
-      
-      if (material) {
-        material.uniforms.uSpeed.value = speed;
-        material.uniforms.uMirror.value = mirror;
-      }
-      break;
+  // Базовая центральная сфера — всегда видна
+  float r=0.9;
+  float d = length(p) - r;
+
+  // Если есть другие окна — добавляем призрачную сферу для хвоста
+  if(peers > 0.5){
+    float pull = clamp(linkX, -1.0, 1.0);
+    float dir = sign(pull==0.0 ? 1.0 : pull);
+    vec3 c2 = vec3(dir*1.75, 0.0, 0.0);
+    float d2 = length(p-c2) - r;
+    d = smin(d, d2, 0.95);
   }
-});
 
-// Запрос синхронизации при загрузке
-setTimeout(() => {
-  channel.postMessage({ type: 'sync_request', from: windowId });
-}, 1000);
-
-// Обновление HUD с информацией о других окнах
-function updateHUD() {
-  const hud = document.getElementById('hud');
-  const otherWindows = Object.keys(syncData).length;
-  if (otherWindows > 0) {
-    hud.innerHTML += `<br/><small>${otherWindows} окна</small>`;
-  }
+  float n=noise(p*2.1 + t*0.6);
+  d += (n-0.5)*0.15;
+  return d;
 }
+float raymarch(vec3 ro, vec3 rd, float t, float linkX, float peers){
+  float dist=0.0;
+  for(int i=0;i<128;i++){
+    vec3 p=ro+rd*dist;
+    float h=map(p,t,linkX,peers);
+    if(h<0.001) return dist;
+    dist += max(h*0.85, 0.003);
+    if(dist>6.0) break;
+  }
+  return -1.0;
+}
+vec3 calcNormal(vec3 p, float t, float linkX, float peers){
+  float e=0.002; vec2 k=vec2(1.0,-1.0);
+  return normalize(
+    k.xyy*map(p + k.xyy*e, t, linkX, peers) +
+    k.yyx*map(p + k.yyx*e, t, linkX, peers) +
+    k.yxy*map(p + k.yxy*e, t, linkX, peers) +
+    k.xxx*map(p + k.xxx*e, t, linkX, peers)
+  );
+}
+void main(){
+  vec2 uv = (gl_FragCoord.xy/uRes - 0.5) * vec2(uRes.x/uRes.y,1.0);
+  if(uMirror>0.5) uv.x = -uv.x;
 
-(async () => {
-  try {
-    const [vertSrc, fragSrc] = await Promise.all([
-      loadText('./shaders/plasma.vert.glsl'),
-      loadText('./shaders/plasma.frag.glsl'),
-    ]);
+  float t = uTime*uSpeed;
 
-    // Юниформы для шейдера
-    const uniforms = {
-      uTime:   { value: 0.0 },
-      uHue:    { value: ((hueDeg / 360) + seedJitter) % 1.0 },
-      uSpeed:  { value: speed },
-      uMirror: { value: mirror },
-      uRes:    { value: new THREE.Vector2(innerWidth, innerHeight) },
-    };
+  vec3 ro = vec3(0.0,0.0,2.6);
+  vec3 rd = normalize(vec3(uv, -1.7));
 
+  float d = raymarch(ro, rd, t, uLinkX, uPeers);
+  vec3 base = hsl2rgb(vec3(uHue, 0.85, 0.55));
+  vec3 col = vec3(0.0);
+
+  if(d>0.0){
+    vec3 p = ro + rd*d;
+    vec3 n = calcNormal(p, t, uLinkX, uPeers);
+
+    float core = smoothstep(0.45, 0.0, length(p.xy));
+    float wrap = pow(max(dot(n, -rd), 0.0), 3.0);
+    float turb = noise(p*3.3 + t*1.2);
+
+    float glow = (core*1.3 + wrap*0.8 + turb*0.6);
+    col = base * glow * uIntensity;
+
+    float fog = clamp(d/6.0, 0.0, 1.0);
+    col = mix(col, base*0.08, fog);
+  } else {
+    // Фон по тону — заметнее, чтобы не было чёрного экрана
+    float g = 0.22 + 0.32*exp(-dot(uv,uv)*2.0);
+    col = base * g;
+  }
+
+  gl_FragColor = vec4(col,1.0);
+}
+`;
+
+// -------- графика (шейдер) --------
+let renderer, scene, camera, geo, material, mesh, composer=null;
+try{
+  renderer = new THREE.WebGLRenderer({canvas, antialias:true, powerPreference:'high-performance'});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.setClearColor(0x000000, 1.0);
+  renderer.autoClear = true;
+
+  scene  = new THREE.Scene();
+  camera = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+  // ВАЖНО: поддержка новых/старых версий three.js
+  geo    = (THREE.PlaneGeometry ? new THREE.PlaneGeometry(2,2)
+                                : new THREE.PlaneBufferGeometry(2,2));
+
+  const uniforms = {
+    uTime:      { value: 0 },
+    uHue:       { value: 0.0 },
+    uSpeed:     { value: speed },
+    uIntensity: { value: intensity },
+    uMirror:    { value: mirror },
+    uLinkX:     { value: 0.0 },
+    uPeers:     { value: 0.0 },
+    uRes:       { value: new THREE.Vector2(innerWidth, innerHeight) },
+  };
+
+  try{
     material = new THREE.ShaderMaterial({
-      vertexShader: vertSrc,
-      fragmentShader: fragSrc,
+      vertexShader: VERT_SRC,
+      fragmentShader: SIMPLE_MODE ? FRAG_SRC_SIMPLE : FRAG_SRC,
       uniforms,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
+      depthWrite:false,
+      depthTest:false
     });
-
-    // Создаём одну объёмную сферу
-    mesh = new THREE.Mesh(geo, material);
-    scene.add(mesh);
-
-    // Post-processing: RenderPass + UnrealBloomPass
-    const renderScene = new THREE.RenderPass(scene, camera);
-    const bloom = new THREE.UnrealBloomPass(
-      new THREE.Vector2(innerWidth, innerHeight),
-      2.0,   // strength - увеличиваем для яркого свечения
-      0.4,   // radius
-      0.1    // threshold - понижаем для большего свечения
-    );
-
-    composer = new THREE.EffectComposer(renderer);
-    composer.addPass(renderScene);
-    composer.addPass(bloom);
-
-    onResize();
-    animate();
-    
-    console.log('Плазма загружена успешно!');
-  } catch (error) {
-    console.error('Ошибка загрузки шейдеров:', error);
-    // Показываем простой цветной фон в случае ошибки
-    const fallbackMaterial = new THREE.MeshBasicMaterial({ 
-      color: new THREE.Color().setHSL(hueDeg / 360, 0.8, 0.5) 
-    });
-    const fallbackMesh = new THREE.Mesh(geo, fallbackMaterial);
-    scene.add(fallbackMesh);
-    animate();
+  }catch(e){
+    showErr('ShaderMaterial ctor failed: '+ (e && e.message || e));
   }
-})();
 
-function animate(t = 0) {
-  // Переводим t в секунды
-  const timeSec = t * 0.001;
-  if (material) {
-    material.uniforms.uTime.value = timeSec;
+  if(!material){
+    // жёсткий фолбэк: просто цветной квадрат, чтобы было видно, что рендер жив
+    const color = new THREE.Color().setHSL(((forcedHue ?? 200)%360)/360, 0.6, 0.5);
+    material = new THREE.MeshBasicMaterial({color});
   }
-  
-  // Вращение сферы
-  if (mesh) {
-    // Медленное автоматическое вращение
-    mesh.rotation.y += 0.003 * speed;
-    mesh.rotation.x += 0.002 * speed;
-    
-    // Плавное вращение мышью
-    targetRotationY += (mouseX - targetRotationY) * 0.02;
-    targetRotationX += (mouseY - targetRotationX) * 0.02;
-    mesh.rotation.y += targetRotationY * 0.005;
-    mesh.rotation.x += targetRotationX * 0.005;
+
+  mesh = new THREE.Mesh(geo, material);
+  mesh.renderOrder = 0; // фон рисуем первым
+  scene.add(mesh);
+  // UI примитивы больше не нужны — всё рисуем в шейдере
+
+  // Отключаем постпроцессинг для надёжности
+  composer = null;
+
+  onResize();
+  animate();
+
+}catch(e){
+  showErr(e && e.stack || e);
+}
+
+// цикл
+function animate(t=0){
+  try{
+    if(material && material.uniforms){
+      material.uniforms.uTime && (material.uniforms.uTime.value = t*0.001);
+      material.uniforms.uLinkX && (material.uniforms.uLinkX.value = linkX);
+      if(myHueDeg!=null && material.uniforms.uHue){
+        material.uniforms.uHue.value = (myHueDeg%360)/360.0;
+      }
+    }
+    if(composer) composer.render(); else renderer.render(scene, camera);
+  }catch(e){
+    showErr(e && e.stack || e);
   }
-  
-  composer ? composer.render() : renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
-
-function onResize() {
-  renderer.setSize(innerWidth, innerHeight);
-  if (material) {
-    material.uniforms.uRes.value.set(innerWidth, innerHeight);
+function onResize(){
+  try{
+    renderer.setSize(innerWidth, innerHeight);
+    material.uniforms && material.uniforms.uRes && material.uniforms.uRes.value.set(innerWidth, innerHeight);
+  }catch(e){
+    // ignore
   }
 }
 addEventListener('resize', onResize);
+function syncScene(){
+  // collect nodes (self + peers with known hue)
+  const nodes = [];
+  if(myHueDeg!=null){ nodes.push({ id: UUID, cx: myCenter.x, cy: myCenter.y, hue: myHueDeg }); }
+  for(const [id,p] of peers){ if(typeof p.hue==='number'){ nodes.push({ id, cx: p.cx, cy: p.cy, hue: p.hue }); } }
 
-// Обработка мыши для вращения сферы
-addEventListener('mousemove', (e) => {
-  mouseX = (e.clientX / innerWidth) * 2 - 1;
-  mouseY = (e.clientY / innerHeight) * 2 - 1;
-});
-
-// Обработка колеса мыши для масштабирования
-addEventListener('wheel', (e) => {
-  e.preventDefault();
-  camera.position.z += e.deltaY * 0.01;
-  camera.position.z = Math.max(1, Math.min(10, camera.position.z));
-});
-
-// Функции для управления синхронизацией
-function syncWithOtherWindows() {
-  channel.postMessage({
-    type: 'parameter_change',
-    data: { hueDeg, speed, mirror, seed },
-    from: windowId
-  });
-}
-
-// Обработка клавиш для управления
-addEventListener('keydown', (e) => {
-  switch(e.key) {
-    case 'h':
-      // Случайный hue
-      hueDeg = Math.random() * 360;
-      if (material) material.uniforms.uHue.value = ((hueDeg / 360) + seedJitter) % 1.0;
-      syncWithOtherWindows();
-      break;
-    case 's':
-      // Случайная скорость
-      speed = 0.5 + Math.random() * 2.5;
-      if (material) material.uniforms.uSpeed.value = speed;
-      syncWithOtherWindows();
-      break;
-    case 'm':
-      // Переключить зеркало
-      mirror = mirror === 1.0 ? 0.0 : 1.0;
-      if (material) material.uniforms.uMirror.value = mirror;
-      syncWithOtherWindows();
-      break;
-    case 'r':
-      // Полная рандомизация
-      hueDeg = Math.random() * 360;
-      speed = 0.5 + Math.random() * 2.5;
-      mirror = Math.random() > 0.5 ? 1.0 : 0.0;
-      seed = 'random_' + Date.now();
-      
-      if (material) {
-        material.uniforms.uHue.value = ((hueDeg / 360) + seedJitter) % 1.0;
-        material.uniforms.uSpeed.value = speed;
-        material.uniforms.uMirror.value = mirror;
-      }
-      syncWithOtherWindows();
-      break;
+  // Update shader uniform: averaged direction from my sphere to peers
+  if(material && material.uniforms){
+    const u = material.uniforms;
+    let ax = 0, ay = 0, cnt = 0;
+    for(const n of nodes){ if(n.id!==UUID){ ax += (n.cx - myCenter.x); ay += (n.cy - myCenter.y); cnt++; } }
+    if(cnt>0){ ax/=cnt; ay/=cnt; }
+    if(u.uPeers) u.uPeers.value = cnt;
   }
-});
-
-// Минимальные подсказки
-document.addEventListener('DOMContentLoaded', () => {
-  const hud = document.getElementById('hud');
-  hud.innerHTML += `<br/><small>H S M R | мышь</small>`;
-});
+}

@@ -1,27 +1,5 @@
-/* Тёмный фон, канвас во весь экран */
-:root { --hud-bg: rgba(0,0,0,0.45); }
-html, body {
-  height: 100%;
-  margin: 0;
-  background: #000;
-  color: #ddd;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-#scene {
-  display: block;
-  width: 100vw;
-  height: 100vh;
-}
-
-/* Небольшая подсказка в углу */
-#hud {
-  position: fixed;
-  left: 12px;
-  bottom: 12px;
-  background: var(--hud-bg);
-  padding: 8px 10px;
-  border-radius: 6px;
-  user-select: text;
-}
-#hud a { color: #9fd4ff; text-decoration: none; }
-#hud a:hover { text-decoration: underline; }
+html,body{height:100%;margin:0;background:#0b0f13;color:#cfd8dc;font-family:ui-monospace,Menlo,Consolas,monospace}
+#scene{display:block;width:100vw;height:100vh}
+#hud{position:fixed;left:12px;bottom:12px;background:rgba(0,0,0,.45);padding:8px 10px;border-radius:6px}
+a{color:#9fd4ff;text-decoration:none}
+a:hover{text-decoration:underline}
